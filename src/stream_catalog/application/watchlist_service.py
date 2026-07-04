@@ -6,7 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from stream_catalog.domain.entities import Title, Watchlist
-from stream_catalog.domain.errors import ConcurrencyConflictError, TitleNotFoundError
+from stream_catalog.domain.errors import ConcurrencyConflictError
 from stream_catalog.domain.ports import TitleRepository, WatchlistRepository
 from stream_catalog.domain.value_objects import TitleId
 
@@ -43,16 +43,15 @@ class WatchlistService:
     async def get_watchlist(self, user_id: str) -> tuple[Watchlist, list[Title]]:
         """Return the watchlist and resolved titles, skipping deleted ones."""
         watchlist = await self._watchlists.get(user_id)
-        titles: list[Title] = []
-        for item in watchlist.items:
-            try:
-                titles.append(await self._titles.get(item.title_id))
-            except TitleNotFoundError:
-                logger.info(
-                    "Title %s from watchlist of %s no longer exists, skipping",
-                    item.title_id,
-                    user_id,
-                )
+        titles = await self._titles.get_many([item.title_id for item in watchlist.items])
+        missing = {item.title_id for item in watchlist.items} - {title.id for title in titles}
+        if missing:
+            logger.info(
+                "Watchlist of %s references %d deleted title(s), skipping: %s",
+                user_id,
+                len(missing),
+                ", ".join(sorted(str(title_id) for title_id in missing)),
+            )
         return watchlist, titles
 
     async def _mutate_with_retry(

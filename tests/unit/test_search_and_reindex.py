@@ -42,7 +42,7 @@ class TestSearchService:
 
 
 class TestReindexService:
-    async def test_recreates_index_and_streams_everything(self) -> None:
+    async def test_rebuilds_index_and_streams_everything(self) -> None:
         titles = InMemoryTitleRepository()
         index = FakeSearchIndex()
         for number in range(7):
@@ -50,5 +50,15 @@ class TestReindexService:
         service = ReindexService(titles, index)
         indexed = await service.reindex_all()
         assert indexed == 7
-        assert index.recreated == 1
+        assert index.rebuilds == 1
         assert len(index.indexed) == 7
+
+    async def test_rebuild_replaces_stale_documents(self) -> None:
+        titles = InMemoryTitleRepository()
+        index = FakeSearchIndex()
+        stale = make_title(name="Deleted meanwhile")
+        index.indexed[stale.id.value] = stale
+        await titles.add(make_title(name="Survivor"))
+        indexed = await ReindexService(titles, index).reindex_all()
+        assert indexed == 1
+        assert [title.name for title in index.indexed.values()] == ["Survivor"]

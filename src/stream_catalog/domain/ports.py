@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from typing import Protocol
 
 from stream_catalog.domain.entities import Title, Watchlist
@@ -17,6 +17,10 @@ class TitleRepository(Protocol):
 
     async def get(self, title_id: TitleId) -> Title:
         """Raise ``TitleNotFoundError`` when the title does not exist."""
+        ...
+
+    async def get_many(self, title_ids: Sequence[TitleId]) -> list[Title]:
+        """Return the titles that exist in one batch; missing ids are skipped."""
         ...
 
     async def save(self, title: Title) -> None:
@@ -69,8 +73,9 @@ class TitleSearchIndex(Protocol):
 
     async def search(self, query: SearchQuery) -> SearchResultPage: ...
 
-    async def bulk_index(self, titles: Sequence[Title]) -> int: ...
+    async def rebuild(self, titles: AsyncIterable[Title]) -> int:
+        """Rebuild the index from scratch without downtime for readers.
 
-    async def recreate(self) -> None:
-        """Drop and re-create the index; used by the reindex use case."""
+        Return the number of indexed titles; used by the reindex use case.
+        """
         ...

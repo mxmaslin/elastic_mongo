@@ -9,12 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from stream_catalog.domain.entities import Title
 from stream_catalog.domain.ports import TitleRepository, TitleSearchIndex
 
 logger = logging.getLogger(__name__)
-
-_BATCH_SIZE = 500
 
 
 class ReindexService:
@@ -23,16 +20,7 @@ class ReindexService:
         self._search_index = search_index
 
     async def reindex_all(self) -> int:
-        """Recreate the index and stream every title into it in batches."""
-        await self._search_index.recreate()
-        indexed = 0
-        batch: list[Title] = []
-        async for title in self._titles.iter_all():
-            batch.append(title)
-            if len(batch) >= _BATCH_SIZE:
-                indexed += await self._search_index.bulk_index(batch)
-                batch.clear()
-        if batch:
-            indexed += await self._search_index.bulk_index(batch)
+        """Stream every title from the source of truth into a fresh index."""
+        indexed = await self._search_index.rebuild(self._titles.iter_all())
         logger.info("Reindex finished: %d titles", indexed)
         return indexed

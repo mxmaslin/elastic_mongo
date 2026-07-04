@@ -17,7 +17,7 @@
 | Полнотекстовый поиск: multi_match, fuzziness, фильтры, highlight, пагинация | `infrastructure/es/`, `application/search_service.py` |
 | Консистентность Mongo → ES: best-effort + reindex, честный trade-off про outbox/CDC | README «Consistency & fault tolerance» |
 | DDD-слои, ports & adapters | `src/stream_catalog/` |
-| Тестовая культура | 58 unit + 35 integration/e2e; uuid-изоляция прогонов |
+| Тестовая культура | 59 unit + 36 integration/e2e; uuid-изоляция прогонов |
 | CI | GitHub Actions: lint → unit → integration → docker build |
 
 ## Критерий готовности

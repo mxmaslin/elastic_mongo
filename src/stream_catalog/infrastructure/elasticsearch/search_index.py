@@ -3,11 +3,17 @@
 All calls go through a retry policy with exponential backoff; when the
 backend stays unreachable the adapter raises ``SearchUnavailableError`` and
 lets the application layer decide (best-effort for writes, 503 for search).
+
+The public index name is an *alias*; every rebuild creates a fresh physical
+index, fills it, and swaps the alias atomically, so search stays available
+(and consistent) during the whole reindex.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+import uuid
+from collections.abc import AsyncIterable, Sequence
 from typing import Any
 
 from elastic_transport import TransportError
@@ -28,6 +34,7 @@ from stream_catalog.infrastructure.retry import with_retries
 
 _RETRIED = (TransportError,)
 _HTTP_NOT_FOUND = 404
+_BULK_BATCH_SIZE = 500
 
 _SORT_CLAUSES: dict[SearchSort, list[dict[str, Any]]] = {
     SearchSort.RELEVANCE: [{"_score": "desc"}, {"updated_at": "desc"}],
@@ -70,7 +77,10 @@ class EsTitleSearchIndex:
     async def ensure_ready(self) -> None:
         async def operation() -> None:
             if not await self._client.indices.exists(index=self._index_name):
-                await self._client.indices.create(index=self._index_name, body=TITLES_MAPPING)
+                await self._client.indices.create(
+                    index=self._physical_name(),
+                    body={**TITLES_MAPPING, "aliases": {self._index_name: {}}},
+                )
 
         await self._run(operation)
 
@@ -126,13 +136,47 @@ class EsTitleSearchIndex:
         )
         return SearchResultPage(hits=hits, total=hits_section["total"]["value"])
 
-    async def bulk_index(self, titles: Sequence[Title]) -> int:
+    async def rebuild(self, titles: AsyncIterable[Title]) -> int:
+        """Fill a fresh physical index, then atomically repoint the alias to it.
+
+        Readers keep hitting the previous index until the swap, so a rebuild
+        causes no search downtime; old physical indices are dropped in the
+        same atomic aliases action.
+        """
+        new_index = self._physical_name()
+
+        async def create_new() -> None:
+            await self._client.indices.create(index=new_index, body=TITLES_MAPPING)
+
+        await self._run(create_new)
+        try:
+            indexed = 0
+            batch: list[Title] = []
+            async for title in titles:
+                batch.append(title)
+                if len(batch) >= _BULK_BATCH_SIZE:
+                    indexed += await self._bulk_into(new_index, batch)
+                    batch.clear()
+            if batch:
+                indexed += await self._bulk_into(new_index, batch)
+            await self._run(lambda: self._swap_alias_to(new_index))
+        except Exception:
+            # Best-effort cleanup; the alias still points at the old index.
+            with contextlib.suppress(TransportError, ApiError):
+                await self._client.options(ignore_status=404).indices.delete(index=new_index)
+            raise
+        return indexed
+
+    def _physical_name(self) -> str:
+        return f"{self._index_name}-{uuid.uuid4().hex[:12]}"
+
+    async def _bulk_into(self, index_name: str, titles: Sequence[Title]) -> int:
         async def operation() -> int:
             success, _ = await es_helpers.async_bulk(
                 self._client,
                 (
                     {
-                        "_index": self._index_name,
+                        "_index": index_name,
                         "_id": title.id.value,
                         "_source": _title_to_source(title),
                     }
@@ -145,12 +189,15 @@ class EsTitleSearchIndex:
         indexed: int = await self._run(operation)
         return indexed
 
-    async def recreate(self) -> None:
-        async def operation() -> None:
-            await self._client.options(ignore_status=404).indices.delete(index=self._index_name)
-            await self._client.indices.create(index=self._index_name, body=TITLES_MAPPING)
-
-        await self._run(operation)
+    async def _swap_alias_to(self, new_index: str) -> None:
+        actions: list[dict[str, Any]] = [{"add": {"index": new_index, "alias": self._index_name}}]
+        if await self._client.indices.exists_alias(name=self._index_name):
+            current = await self._client.indices.get_alias(name=self._index_name)
+            actions.extend({"remove_index": {"index": name}} for name in current.body)
+        elif await self._client.indices.exists(index=self._index_name):
+            # A concrete index occupies the public name (pre-alias layout).
+            actions.append({"remove_index": {"index": self._index_name}})
+        await self._client.indices.update_aliases(body={"actions": actions})
 
     def _build_request(self, query: SearchQuery) -> dict[str, Any]:
         must: list[dict[str, Any]] = []

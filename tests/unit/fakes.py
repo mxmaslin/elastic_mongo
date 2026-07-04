@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Sequence
 
 from stream_catalog.domain.entities import Title, Watchlist
 from stream_catalog.domain.errors import (
@@ -40,6 +40,13 @@ class InMemoryTitleRepository:
     async def delete(self, title_id: TitleId) -> None:
         if self.storage.pop(title_id.value, None) is None:
             raise TitleNotFoundError(title_id.value)
+
+    async def get_many(self, title_ids: Sequence[TitleId]) -> list[Title]:
+        return [
+            copy.deepcopy(self.storage[title_id.value])
+            for title_id in title_ids
+            if title_id.value in self.storage
+        ]
 
     async def list_page(self, *, offset: int, limit: int) -> tuple[list[Title], int]:
         ordered = sorted(self.storage.values(), key=lambda title: title.created_at, reverse=True)
@@ -78,7 +85,7 @@ class FakeSearchIndex:
         self.available = True
         self.indexed: dict[str, Title] = {}
         self.removed: list[str] = []
-        self.recreated = 0
+        self.rebuilds = 0
         self.search_queries: list[SearchQuery] = []
         self.search_result = SearchResultPage(hits=(), total=0)
 
@@ -103,13 +110,11 @@ class FakeSearchIndex:
         self.search_queries.append(query)
         return self.search_result
 
-    async def bulk_index(self, titles: Sequence[Title]) -> int:
+    async def rebuild(self, titles: AsyncIterable[Title]) -> int:
         self._check_available()
-        for title in titles:
-            self.indexed[title.id.value] = copy.deepcopy(title)
-        return len(titles)
-
-    async def recreate(self) -> None:
-        self._check_available()
-        self.indexed.clear()
-        self.recreated += 1
+        rebuilt: dict[str, Title] = {}
+        async for title in titles:
+            rebuilt[title.id.value] = copy.deepcopy(title)
+        self.indexed = rebuilt
+        self.rebuilds += 1
+        return len(rebuilt)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -31,6 +31,14 @@ class MongoTitleRepository:
         if document is None:
             raise TitleNotFoundError(title_id.value)
         return title_from_document(document)
+
+    async def get_many(self, title_ids: Sequence[TitleId]) -> list[Title]:
+        if not title_ids:
+            return []
+        ids = [title_id.value for title_id in title_ids]
+        cursor = self._collection.find({"_id": {"$in": ids}})
+        by_id = {document["_id"]: title_from_document(document) async for document in cursor}
+        return [by_id[value] for value in ids if value in by_id]
 
     async def save(self, title: Title) -> None:
         document = title_to_document(title)

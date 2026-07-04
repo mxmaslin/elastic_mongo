@@ -73,7 +73,16 @@ async def clean_state(
     mongo_client: AsyncIOMotorClient[dict[str, Any]],
     es_client: AsyncElasticsearch,
 ) -> AsyncIterator[None]:
-    """Give every test a blank database and search index."""
+    """Give every test a blank database and search index.
+
+    The public index name is an alias over uuid-named physical indices, so
+    cleanup resolves the alias first and drops the physical indices behind it.
+    """
     await mongo_client.drop_database(settings.mongo_db)
-    await es_client.options(ignore_status=404).indices.delete(index=settings.es_index)
+    if await es_client.indices.exists_alias(name=settings.es_index):
+        aliased = await es_client.indices.get_alias(name=settings.es_index)
+        for physical_name in aliased.body:
+            await es_client.options(ignore_status=404).indices.delete(index=physical_name)
+    else:
+        await es_client.options(ignore_status=404).indices.delete(index=settings.es_index)
     yield

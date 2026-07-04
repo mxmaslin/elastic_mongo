@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Iterable
+
 import pytest
 import pytest_asyncio
 from elasticsearch import AsyncElasticsearch
 
 from stream_catalog.config import Settings
+from stream_catalog.domain.entities import Title
 from stream_catalog.domain.errors import SearchUnavailableError
 from stream_catalog.domain.search import SearchFilters, SearchQuery, SearchSort
 from stream_catalog.domain.value_objects import Genre, TitleId, TitleType
 from stream_catalog.infrastructure.elasticsearch.search_index import EsTitleSearchIndex
 from tests.unit.factories import make_series, make_title
+
+
+async def _stream(titles: Iterable[Title]) -> AsyncIterator[Title]:
+    for title in titles:
+        yield title
 
 
 @pytest_asyncio.fixture
@@ -27,19 +35,21 @@ async def search_index(es_client: AsyncElasticsearch, settings: Settings) -> EsT
 
 @pytest_asyncio.fixture
 async def populated_index(search_index: EsTitleSearchIndex) -> EsTitleSearchIndex:
-    await search_index.bulk_index(
-        [
-            make_title(name="Inception", genres=["sci-fi", "thriller"], release_year=2010),
-            make_title(name="Interstellar", genres=["sci-fi", "drama"], release_year=2014),
-            make_title(
-                name="The Grand Budapest Hotel",
-                genres=["comedy"],
-                release_year=2014,
-                rating=8.1,
-                cast=["Ralph Fiennes"],
-            ),
-            make_series(name="Dark"),
-        ]
+    await search_index.rebuild(
+        _stream(
+            [
+                make_title(name="Inception", genres=["sci-fi", "thriller"], release_year=2010),
+                make_title(name="Interstellar", genres=["sci-fi", "drama"], release_year=2014),
+                make_title(
+                    name="The Grand Budapest Hotel",
+                    genres=["comedy"],
+                    release_year=2014,
+                    rating=8.1,
+                    cast=["Ralph Fiennes"],
+                ),
+                make_series(name="Dark"),
+            ]
+        )
     )
     return search_index
 
@@ -103,8 +113,20 @@ class TestIndexLifecycle:
     async def test_remove_missing_ok(self, search_index: EsTitleSearchIndex) -> None:
         await search_index.remove(TitleId.new())
 
-    async def test_recreate_drops_documents(self, populated_index: EsTitleSearchIndex) -> None:
-        await populated_index.recreate()
+    async def test_rebuild_replaces_documents_atomically(
+        self, populated_index: EsTitleSearchIndex
+    ) -> None:
+        indexed = await populated_index.rebuild(
+            _stream([make_title(name="Tenet", release_year=2020)])
+        )
+        assert indexed == 1
+        page = await populated_index.search(SearchQuery())
+        assert [hit.name for hit in page.hits] == ["Tenet"]
+
+    async def test_rebuild_with_empty_source_empties_the_index(
+        self, populated_index: EsTitleSearchIndex
+    ) -> None:
+        assert await populated_index.rebuild(_stream([])) == 0
         page = await populated_index.search(SearchQuery())
         assert page.total == 0
 
