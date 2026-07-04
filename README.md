@@ -2,38 +2,41 @@
 
 [![CI](https://github.com/mxmaslin/elastic_mongo/actions/workflows/ci.yml/badge.svg)](https://github.com/mxmaslin/elastic_mongo/actions/workflows/ci.yml)
 
-A media catalog & search service — the kind of backend that powers the catalog
-screen of a streaming app. Built as a compact but production-shaped showcase of
-**MongoDB** (document modeling, optimistic concurrency, atomic upserts) and
-**Elasticsearch** (full-text search, filters, relevance tuning), organized with
-**DDD layering** and fully covered by unit, integration and end-to-end tests.
+Сервис каталога и поиска медиаконтента — бэкенд того типа, что стоит за
+экраном каталога стримингового приложения. Компактный, но устроенный
+по-производственному showcase **MongoDB** (документная модель, optimistic
+concurrency, атомарные upsert'ы) и **Elasticsearch** (полнотекстовый поиск,
+фильтры, настройка релевантности) с **DDD-слоями** и полным покрытием
+unit-, интеграционными и end-to-end тестами.
 
-## What it does
+## Что умеет
 
-- **Catalog CRUD** — movies and series with embedded seasons/episodes,
-  stored in MongoDB (the source of truth).
-- **Full-text search** — `multi_match` over name/cast/description with fuzziness,
-  genre/type/year filters, sorting (relevance, rating, year), highlighting and
-  pagination, backed by Elasticsearch.
-- **Watchlists** — a per-user list with idempotent PUT/DELETE semantics,
-  duplicate/size invariants enforced by the aggregate.
-- **Reindex** — one call rebuilds the search index from MongoDB.
-- **Health probes** — liveness and readiness (checks both backends).
+- **CRUD каталога** — фильмы и сериалы со вложенными сезонами и эпизодами;
+  хранятся в MongoDB (источник истины).
+- **Полнотекстовый поиск** — `multi_match` по названию, актёрам и описанию
+  с fuzziness, фильтры по жанру/типу/годам, сортировка (релевантность,
+  рейтинг, год), подсветка совпадений и пагинация — на Elasticsearch.
+- **Watchlist** — список «посмотреть позже» для каждого пользователя
+  с идемпотентными PUT/DELETE; инварианты (без дублей, ограничение размера)
+  контролирует агрегат.
+- **Reindex** — один вызов перестраивает поисковый индекс из MongoDB без
+  простоя поиска (новый физический индекс + атомарное переключение alias).
+- **Health-пробы** — liveness и readiness (проверяет оба бэкенда).
 
-## Architecture
+## Архитектура
 
 ```mermaid
 flowchart LR
     subgraph API["api (FastAPI)"]
-        R[routers / schemas / error mapping]
+        R[роутеры / схемы / маппинг ошибок]
     end
     subgraph APP["application"]
         UC[CatalogService · SearchService · WatchlistService · ReindexService]
     end
     subgraph DOM["domain"]
-        AGG[Title · Watchlist aggregates]
+        AGG[агрегаты Title · Watchlist]
         VO[value objects]
-        P[(ports)]
+        P[(порты)]
     end
     subgraph INF["infrastructure"]
         M[MongoTitleRepository · MongoWatchlistRepository]
@@ -41,49 +44,54 @@ flowchart LR
     end
     R --> UC --> AGG
     UC --> P
-    M -. implements .-> P
-    E -. implements .-> P
+    M -. реализует .-> P
+    E -. реализует .-> P
     M --> MongoDB[(MongoDB)]
     E --> ES[(Elasticsearch)]
 ```
 
-Layering rules: **domain** is pure Python (no framework or driver imports),
-**application** orchestrates aggregates through ports, **infrastructure**
-implements the ports, **api** maps HTTP onto commands and domain errors onto
-status codes (404 / 409 / 422 / 503).
+Правила слоёв: **domain** — чистый Python (никаких импортов фреймворков
+и драйверов), **application** оркестрирует агрегаты через порты,
+**infrastructure** реализует порты, **api** переводит HTTP в команды,
+а доменные ошибки — в статус-коды (404 / 409 / 422 / 503).
 
-### Consistency & fault tolerance
+### Консистентность и отказоустойчивость
 
-MongoDB is the source of truth; Elasticsearch is a projection.
+MongoDB — источник истины; Elasticsearch — проекция.
 
-- Writes go to MongoDB first, then the document is indexed **best-effort**
-  (retries with exponential backoff inside the adapter). If the search backend
-  is down, the write still succeeds and the API stays available — search
-  results converge after `POST /v1/admin/reindex`.
-- Search requires the backend, so an outage maps to **503** with a clear body,
-  while catalog CRUD keeps working (graceful degradation, verified by tests).
-- Both aggregates use **optimistic concurrency** (a `version` field guarded at
-  the repository level); the watchlist use case retries conflicts a bounded
-  number of times.
+- Запись сначала идёт в MongoDB, затем документ индексируется
+  **best-effort** (retry с экспоненциальным backoff внутри адаптера).
+  Если поисковый бэкенд лежит, запись всё равно проходит и API остаётся
+  доступным — поиск сходится к истине после `POST /v1/admin/reindex`.
+- Поиску бэкенд необходим, поэтому его недоступность отображается
+  в **503** с внятным телом ответа, а CRUD каталога продолжает работать
+  (graceful degradation, проверено тестами).
+- Оба агрегата используют **optimistic concurrency** (поле `version`
+  проверяется на уровне репозитория); use case watchlist'а повторяет
+  конфликтующие операции ограниченное число раз.
+- Публичное имя индекса — **alias**: reindex наполняет свежий физический
+  индекс и атомарно переключает alias, так что поиск никогда не видит
+  полусобранный индекс, а перестройка проходит без простоя.
 
-**Trade-off, documented on purpose:** dual-write (Mongo, then ES) can lose an
-index update on a crash between the two writes. The production-grade fix is a
-transactional outbox + async projector (or CDC via change streams); for this
-service the reindex endpoint is the convergence mechanism, keeping the demo
-honest without pretending the problem doesn't exist.
+**Осознанный trade-off:** dual-write (сначала Mongo, потом ES) может
+потерять обновление индекса при падении между двумя записями.
+Производственное решение — транзакционный outbox с асинхронным
+проектором (или CDC через change streams); здесь механизмом сходимости
+служит эндпоинт reindex — демо остаётся честным и не делает вид, что
+проблемы не существует.
 
-## API at a glance
+## API вкратце
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/v1/titles` | Create a movie/series |
-| GET | `/v1/titles` | List (paged, newest first) |
-| GET / PUT / DELETE | `/v1/titles/{id}` | Read / update / delete |
-| GET | `/v1/search/titles` | Full-text search + filters |
-| PUT / DELETE | `/v1/users/{uid}/watchlist/{title_id}` | Idempotent add/remove |
-| GET | `/v1/users/{uid}/watchlist` | Watchlist with resolved titles |
-| POST | `/v1/admin/reindex` | Rebuild the search index |
-| GET | `/health/live`, `/health/ready` | Probes |
+| Метод | Путь | Назначение |
+|-------|------|------------|
+| POST | `/v1/titles` | Создать фильм/сериал |
+| GET | `/v1/titles` | Список (постранично, новые первыми) |
+| GET / PUT / DELETE | `/v1/titles/{id}` | Чтение / обновление / удаление |
+| GET | `/v1/search/titles` | Полнотекстовый поиск + фильтры |
+| PUT / DELETE | `/v1/users/{uid}/watchlist/{title_id}` | Идемпотентное добавление/удаление |
+| GET | `/v1/users/{uid}/watchlist` | Watchlist с резолвом тайтлов |
+| POST | `/v1/admin/reindex` | Перестроить поисковый индекс |
+| GET | `/health/live`, `/health/ready` | Пробы |
 
 ```bash
 curl -s -X POST localhost:8000/v1/titles -H 'content-type: application/json' -d '{
@@ -96,15 +104,15 @@ curl -s -X POST localhost:8000/v1/titles -H 'content-type: application/json' -d 
 curl -s 'localhost:8000/v1/search/titles?q=dream+thief&genre=sci-fi&year_from=2005&sort=relevance'
 ```
 
-Interactive docs: `http://localhost:8000/docs`.
+Интерактивная документация: `http://localhost:8000/docs`.
 
-## Running
+## Запуск
 
 ```bash
-docker compose up --build          # API on :8000, MongoDB on :27017, ES on :9200
+docker compose up --build          # API на :8000, MongoDB на :27017, ES на :9200
 ```
 
-Local development:
+Локальная разработка:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
@@ -113,24 +121,24 @@ docker compose up -d mongo elasticsearch
 uvicorn stream_catalog.api.app:app --reload
 ```
 
-## Tests & quality gates
+## Тесты и quality gates
 
 ```bash
-ruff check . && ruff format --check .   # lint + formatting
-mypy                                     # strict type checking
-pytest tests/unit -q                     # pure unit tests, no I/O
+ruff check . && ruff format --check .   # линтер + форматирование
+mypy                                     # строгая проверка типов
+pytest tests/unit -q                     # чистые unit-тесты, без I/O
 docker compose up -d mongo elasticsearch
-pytest tests/integration -q              # real Mongo + ES + e2e API
+pytest tests/integration -q              # реальные Mongo + ES + e2e API
 ```
 
-The same gates run in CI (GitHub Actions): lint → unit → integration
-(with MongoDB and Elasticsearch service containers) → docker build.
-Integration tests use a uuid-suffixed database and index per session, so
-runs never interfere.
+Те же гейты выполняются в CI (GitHub Actions): lint → unit → integration
+(с сервис-контейнерами MongoDB и Elasticsearch) → docker build.
+Интеграционные тесты используют базу и индекс с uuid-суффиксом на сессию,
+поэтому прогоны не мешают друг другу.
 
-## Production notes (out of scope here, by design)
+## Production-заметки (сознательно за рамками проекта)
 
-- Outbox/CDC instead of best-effort dual-write (see trade-off above).
-- AuthN/AuthZ (the admin reindex endpoint must sit behind RBAC).
-- Elasticsearch replicas, ILM, snapshots; MongoDB replica set.
-- Metrics/tracing (Prometheus + OpenTelemetry) on top of the structured logs.
+- Outbox/CDC вместо best-effort dual-write (см. trade-off выше).
+- AuthN/AuthZ (админский эндпоинт reindex должен стоять за RBAC).
+- Реплики Elasticsearch, ILM, снапшоты; replica set MongoDB.
+- Метрики и трейсинг (Prometheus + OpenTelemetry) поверх структурных логов.
